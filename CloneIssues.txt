@@ -1,0 +1,826 @@
+function onOpen() {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var menuEntries = [{
+            name: "Schedule 24 Hourly Automatic Refresh",
+            functionName: "scheduleRefresh"
+        },
+        {
+            name: "Stop Automatic Refresh",
+            functionName: "removeTriggers"
+        },
+        {
+            name: "Load / Create Issues (DRY RUN) ",
+            functionName: "loadIssuesDry"
+        },
+        {
+            name: "Load / Create Issues ",
+            functionName: "loadIssues"
+        },
+        {
+            name: "Backup Data",
+            functionName: "copyData"
+        },
+        {
+            name: "Clear Backup Data",
+            functionName: "cleanCopyData"
+        },
+        {
+            name: "Add Marker Label to the Issue",
+            functionName: "addMarker"
+        },
+        {
+            name: "Remove Marker Label to the Issue",
+            functionName: "removeMarker"
+        }, 
+        {
+            name: "Forget Store Password",
+            functionName: "resetPassword"
+        }
+    ];
+    ss.addMenu("Jira", menuEntries);
+    readConfig("Query");
+    readConfig("Configuration");
+}
+
+
+function onEdit() {
+    readConfig("Query");
+    readConfig("Configuration");
+}
+
+function resetPassword() {
+    PropertiesService.getUserProperties().deleteProperty("digest");
+}
+
+function removeTriggers() {
+    var triggers = ScriptApp.getProjectTriggers();
+    for (var i = 0; i < triggers.length; i++) {
+        ScriptApp.deleteTrigger(triggers[i]);
+    }
+    Browser.msgBox("Spreadsheet will no longer refresh automatically.");
+}
+
+function scheduleRefresh() {
+    var triggers = ScriptApp.getProjectTriggers();
+    for (var i = 0; i < triggers.length; i++) {
+        ScriptApp.deleteTrigger(triggers[i]);
+    }
+    ScriptApp.newTrigger("loadIssues").timeBased().everyHours(24).create();
+    Browser.msgBox("Spreadsheet will refresh automatically every 24 hours.");
+}
+
+function readConfig(sheetName) {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+    var values = sheet.getRange(2, 1, sheet.getLastRow(), sheet.getLastColumn()).getValues();
+    for (m = 0; m < values.length; m++) {
+        if (values[m][0]) {
+            PropertiesService.getScriptProperties().setProperty(values[m][0], values[m][1]);
+            Logger.log("First : " + values[m][0] + "Second" + values[m][1]);
+        }
+    }
+}
+
+function encodeQuery(query) {
+    return encodeURIComponent(query).replace(/'/g, "%27").replace(/"/g, "%22");
+}
+
+function setUp(){
+  var issue_list = PropertiesService.getScriptProperties().getProperty("issue_list");
+
+}
+
+function loadIssues() {
+    var confirm = Browser.msgBox( 'Please confirm','Are you sure you want to continue? This Action will create Issues in Jira', Browser.Buttons.YES_NO);
+    Logger.log("Confimation to run the script" + confirm);
+    if (confirm == "yes") {
+        var issue_list = PropertiesService.getScriptProperties().getProperty("issue_list");
+        loadDataToSheet(encodeQuery(issue_list), "Issue List", "false");
+        SpreadsheetApp.flush();
+        markLabel("add");
+        SpreadsheetApp.flush();
+    }
+}
+function loadIssuesDry() {
+    var issue_list = PropertiesService.getScriptProperties().getProperty("issue_list");
+    loadDataToSheet(encodeQuery(issue_list), "Issue List", "true");
+    SpreadsheetApp.flush();
+}
+
+function cleanCopyData() {
+    cleanSheet("backup");
+    SpreadsheetApp.flush();
+}
+
+function addMarker() {
+    markLabel("add");
+    SpreadsheetApp.flush();
+}
+
+function removeMarker() {
+    markLabel("remove");
+    SpreadsheetApp.flush();
+}
+
+function loadDataToSheet(querySet, sheetName, dry_run) {
+
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+    var Prefix_summary = PropertiesService.getScriptProperties().getProperty("Prefix_summary");
+    var backup_strategy = PropertiesService.getScriptProperties().getProperty("backup_strategy");
+    var response;
+    if (backup_strategy.toLowerCase() == "delete") {
+        cleanSheet(sheetName);
+    } else {
+        copyData();
+    }
+    //sheet.getRange("B1").setValue("Last Update On : " + Utilities.formatDate(new Date(), "GMT+0530", "dd-MM-yyyy"));
+    //sheet.getRange("C1").setValue("Update By : " + Session.getActiveUser().getEmail());
+    c_num = 2;
+    try {
+        issuelist = seachIssues(querySet);
+    } catch (e) {
+        sheet.getRange(('F' + c_num)).setValue("Not able to get issue list from JIRA , Please verify JQL" + e.message);
+        Logger.log("Not able to get issue list from JIRA , Please verify JQL " + e.message);
+        return;
+    }
+    if (issuelist != "Fail") {
+        issue_len = issuelist.issues.length;
+        Logger.log('Issue Lenght : ' + issue_len);
+        payload_str = "";
+        var landing_ver_conf = "";
+        for (i = 0; i < issuelist.issues.length; i++) {
+            c_num = c_num + 1;
+            l_pri = 'A' + c_num;
+            c_pri = issuelist.issues[i].key;
+            sheet.getRange(l_pri).setFormula('=HYPERLINK("https://uswdv001.jira.com/browse/' + c_pri + '","' + c_pri + '")');
+            ver = issuelist.issues[i].fields.versions[0].name;
+            sheet.getRange(('B' + c_num)).setValue(ver);
+            //hf_ver = customfield_15041
+            hf_ver = issuelist.issues[i].fields.customfield_15041
+            if (hf_ver != null) {
+                hf_flag = "T";
+            } else {
+                hf_flag = "F";
+            }
+            try {
+                landing_ver_conf = landingVersion(extractVersion(ver), hf_flag);
+            } catch (e) {
+                sheet.getRange(('F' + c_num)).setValue("Tool Not able to decide destination Version " + e.message);
+                Logger.log("Tool Not able to decide destination Version " + e.message);
+                continue;
+            }
+            landing_proj = "";
+            landing_ver = "";
+            for (nc = 0; nc < landing_ver_conf.length; nc++) {
+                if (nc != 0) {
+                    c_num = c_num + 1;
+                    sheet.getRange(('A' + c_num)).setFormula('=HYPERLINK("https://uswdv001.jira.com/browse/' + c_pri + '","' + c_pri + '")');
+                    sheet.getRange(('B' + c_num)).setValue(ver[0].name);
+                }
+                landing_proj = landing_ver_conf[nc][0];
+                landing_ver = landing_ver_conf[nc][1];
+                sheet.getRange(('C' + c_num)).setValue(landing_proj);
+                sheet.getRange(('D' + c_num)).setValue(landing_ver);
+                try {
+                    switch (landing_proj) {
+                        case "SFDC2":
+                            payload_str = createJsonPayloadSFDC2(issuelist.issues[i], landing_proj, landing_ver, Prefix_summary);
+                            break;
+                        case "SFDC":
+                            payload_str = createJsonPayloadSFDC(issuelist.issues[i], landing_proj, landing_ver, Prefix_summary);
+                            break;
+                        default:
+                            Logger.log("Wrong Project selected");
+                            break;
+                    }
+                } catch (e) {
+                    sheet.getRange(('F' + c_num)).setValue("Tool Not able create payload Please verify the issue detail and version configuration" + e.message);
+                    Logger.log("Tool Not able create payload Please verify the issue detail and version configuration" + e.message);
+                    continue;
+                }
+                payload = JSON.stringify(payload_str);
+                if (dry_run.toLowerCase() != "true") {
+                    try {
+                        response = createIssue(payload_str);
+                    } catch (e) {
+                        sheet.getRange(('F' + c_num)).setValue("Exception While creating Issue on Jira" + e.message);
+                        sheet.getRange(('G' + c_num)).setValue("Exception While creating Issue on Jira" + payload);
+                        Logger.log("Exception While creating Issue on Jira" + response + e.message);
+                        continue;
+                    }
+                    response = JSON.parse(response);
+                    new_issue_create = response.key;
+                    sheet.getRange(('E' + c_num)).setFormula('=HYPERLINK("https://uswdv001.jira.com/browse/' + new_issue_create + '","' + new_issue_create + '")');
+                    cloneLink(new_issue_create, c_pri);
+                }
+                sheet.getRange(('F' + c_num)).setValue(payload);
+            }
+        }
+    } else {
+        Logger.log("Error Whlie Procession the JQL ");
+    }
+}
+
+function testLandingVersion() {
+    landing_array = landingVersion("SFDC 4.2.5", "T");
+}
+
+function landingVersion(ver, hf_flag) {
+    o_config = new Array();
+    var counter_arry = 0;
+    if (hf_flag == "T") {
+        ver = ver + "H";
+    }
+    if (!PropertiesService.getScriptProperties().getProperty(ver)) {
+        Logger.log("Version is not defined on configuration ");
+    } else {
+        var ver_config = PropertiesService.getScriptProperties().getProperty(ver);
+    }
+    ver_config_arr = ver_config.split(",");
+    for (index = 0; index < ver_config_arr.length; index = index + 2) {
+        i_config = [ver_config_arr[index].trim(), ver_config_arr[index + 1].trim()];
+        o_config[counter_arry] = i_config;
+        counter_arry = counter_arry + 1;
+    }
+    return o_config;
+
+}
+
+function testExtractVersion() {
+    ext_v = extractVersion("SFDC 5.1-032417");
+}
+
+function extractVersion(ver) {
+    acctual_ver = ver.indexOf("-");
+    if (acctual_ver > 0) {
+        return ver.substring(0, acctual_ver);
+    }
+    return ver;
+}
+
+function createJsonPayload(issueMeta, destProj, destFixversion) {
+    summary = "[CLONE- THIS IS FOR TESTING PLEASE IGNORE!!!]" + issueMeta.fields.summary;
+    description = issueMeta.fields.description;
+    //comp = issueMeta.fields.components;
+    ver = issueMeta.fields.versions;
+    issueType = issueMeta.fields.issuetype.name;
+
+    //Custom Field : Browser(s)/Client(s) is required.  
+    c_f_11744 = issueMeta.fields.customfield_11744;
+    if (c_f_11744 != null) {
+        c_f_11744 = c_f_11744;
+    } else {
+        c_f_11744 = [{
+            "value": "N/A"
+        }];
+    }
+    //Custom Field : Regression Issue is required
+    c_f_18101 = issueMeta.fields.customfield_18101
+    if (c_f_18101 != null) {
+        c_f_18101 = c_f_18101;
+    } else {
+        c_f_18101 = [{
+            "value": "No"
+        }];
+    }
+    //Custom Field : Operating System is required.
+    c_f_11743 = issueMeta.fields.customfield_11743;
+    if (c_f_11743 != null) {
+        c_f_11743 = c_f_11743;
+    } else {
+        c_f_11743 = "";
+    }
+    //Custom Field : Testcase ID is required.
+    c_f_11240 = issueMeta.fields.customfield_11240;
+    if (c_f_11240 != null) {
+        c_f_11240 = c_f_11240;
+    } else {
+        c_f_11240 = "TBD";
+    }
+    //Custom Field : Recurrence Pattern is required.
+    c_f_11840 = issueMeta.fields.customfield_11840
+    if (c_f_11840 != null) {
+        c_f_11840 = c_f_18101;
+    } else {
+        c_f_11840 = [{
+            "value": "No"
+        }];
+    }
+    var data = {
+        "fields": {
+            "project": {
+                "key": destProj
+            },
+            "summary": summary,
+            "description": description,
+            "issuetype": {
+                "name": issueType
+            },
+            //"components": comp,
+            "versions": ver,
+            "fixVersions": [{
+                "name": destFixversion
+            }],
+            "customfield_11744": c_f_11744,
+            "customfield_11743": c_f_11743,
+            "customfield_18101": c_f_18101
+        }
+    }
+    return data;
+}
+
+
+function createJsonPayloadSFDC2(issueMeta, destProj, destFixversion, Prefix_summary) {
+    summary = Prefix_summary + issueMeta.fields.summary;
+    description = issueMeta.fields.description;
+    comp = issueMeta.fields.components;
+    if (comp.length > 0) {
+        comp = issueMeta.fields.components[0].name;
+    } else {
+        comp = "SFDC";
+    }
+    ver = issueMeta.fields.versions;
+    issueType = issueMeta.fields.issuetype.name;
+
+    //Custom Field : Browser(s)/Client(s) is required.  
+    c_f_11744 = issueMeta.fields.customfield_11744;
+    if (c_f_11744 != null) {
+        c_f_11744 = c_f_11744;
+    } else {
+        c_f_11744 = "";
+    }
+    //Custom Field : Regression Issue is required
+    c_f_18101 = issueMeta.fields.customfield_18101
+    if (c_f_18101 != null) {
+        c_f_18101 = c_f_18101;
+    } else {
+        c_f_18101 = [{
+            "value": "No"
+        }];
+    }
+    //Custom Field : Operating System is required.
+    c_f_11743 = issueMeta.fields.customfield_11743;
+    if (c_f_11743 != null) {
+        c_f_11743 = c_f_11743;
+    } else {
+        c_f_11743 = "";
+    }
+    //Custom Field : Testcase ID is required.
+    c_f_11240 = issueMeta.fields.customfield_11240;
+    if (c_f_11240 != null) {
+        c_f_11240 = c_f_11240;
+    } else {
+        c_f_11240 = "TBD";
+    }
+    //Custom Field : Severity.
+    c_f_14345 = issueMeta.fields.customfield_14345;
+    if (c_f_14345 != null) {
+        c_f_14345 = c_f_14345;
+    } else {
+        c_f_14345 = {
+            "value": ""
+        };
+    }
+    //Custom Field : Module.
+    c_f_14641 = issueMeta.fields.customfield_14641;
+    if (c_f_14641 != null) {
+        c_f_14641 = c_f_14641;
+    } else {
+        c_f_14641 = {
+            "value": ""
+        };
+    }
+    //Custom Field : CC Priority.
+    c_f_10157 = issueMeta.fields.customfield_10157
+    if (c_f_10157 != null) {
+        c_f_10157 = c_f_10157;
+    } else {
+        c_f_10157 = {
+            "value": "P2"
+        };
+    }
+    //Custom Field : SFDC UI.
+    c_f_18700 = issueMeta.fields.customfield_18700
+    if (c_f_18700 != null) {
+        c_f_18700 = c_f_18700;
+    } else {
+        c_f_18700 = {
+            "value": "N/A"
+        };
+    }
+    //Custom Field : QA Discovery / Analysis.
+    c_f_19000 = issueMeta.fields.customfield_19000
+    if (c_f_19000 != null) {
+        c_f_19000 = c_f_19000;
+    } else {
+        c_f_19000 = {
+            "value": "Need to Analyze More"
+        };
+    }
+    //    //Custom Field : SFDC Seasonal Upgrade:
+    //    c_f_15341 = issueMeta.fields.customfield_15341
+    //    if (c_f_15341 != null) {
+    //        c_f_15341= c_f_15341;
+    //    } else {
+    //        c_f_15341 = {
+    //            "value": "None"
+    //        };
+    //    }
+    //Custom Field : SFDC Seasonal Upgrade:
+    c_f_15341 = issueMeta.fields.customfield_15341
+    if (c_f_15341 != null) {
+        c_f_15341 = c_f_15341;
+    } else {
+        c_f_15341 = null;
+    }
+    //Custom Field : Documentation Required
+    c_f_18201 = issueMeta.fields.customfield_18201
+    if (c_f_18201 != null) {
+        c_f_18201 = c_f_18201;
+    } else {
+        c_f_18201 = null;
+    }
+    //Custom Field : Recurrence Pattern is required.
+    c_f_11840 = issueMeta.fields.customfield_11840
+    if (c_f_11840 != null) {
+        c_f_11840 = c_f_18101;
+    } else {
+        c_f_11840 = [{
+            "value": "No"
+        }];
+    }
+    var data = {
+        "fields": {
+            "project": {
+                "key": destProj
+            },
+            "summary": summary,
+            "description": description,
+            "issuetype": {
+                "name": issueType
+            },
+            //"components": comp,
+            "versions": [{
+                "name": ver[0].name
+            }],
+            "fixVersions": [{
+                "name": destFixversion
+            }],
+            "customfield_11744": c_f_11744,
+            "customfield_11743": c_f_11743,
+            "customfield_15640": {
+                "value": "SFDC"
+            },
+            "customfield_14345": c_f_14345,
+            "customfield_11240": c_f_11240,
+            "customfield_10157": c_f_10157,
+            "customfield_18700": c_f_18700,
+            "customfield_19000": c_f_19000,
+            "customfield_15341": c_f_15341,
+            "customfield_18201": c_f_18201,
+            "customfield_18101": c_f_18101
+        }
+    }
+    return data;
+}
+
+function createJsonPayloadSFDC(issueMeta, destProj, destFixversion, Prefix_summary) {
+    summary = Prefix_summary + issueMeta.fields.summary;
+    description = issueMeta.fields.description;
+    comp = issueMeta.fields.components;
+    ver = issueMeta.fields.versions;
+    issueType = issueMeta.fields.issuetype.name;
+
+    //Custom Field : Browser(s)/Client(s) is required.  
+    c_f_11744 = issueMeta.fields.customfield_11744;
+    if (c_f_11744 != null) {
+        c_f_11744 = c_f_11744;
+    } else {
+        c_f_11744 = [{
+            "value": "N/A"
+        }];
+    }
+    //Custom Field : Regression Issue is required
+    c_f_18101 = issueMeta.fields.customfield_18101
+    if (c_f_18101 != null) {
+        c_f_18101 = c_f_18101;
+    } else {
+        c_f_18101 = [{
+            "value": "No"
+        }];
+    }
+    //Custom Field : Operating System is required.
+    c_f_11743 = issueMeta.fields.customfield_11743;
+    if (c_f_11743 != null) {
+        c_f_11743 = c_f_11743;
+    } else {
+        c_f_11743 = "";
+    }
+    //Custom Field : Testcase ID is required.
+    c_f_11240 = issueMeta.fields.customfield_11240;
+    if (c_f_11240 != null) {
+        c_f_11240 = c_f_11240;
+    } else {
+        c_f_11240 = "TBD";
+    }
+    //Custom Field : Severity.
+    c_f_14345 = issueMeta.fields.customfield_14345;
+    if (c_f_14345 != null) {
+        c_f_14345 = c_f_14345;
+    } else {
+        c_f_14345 = {
+            "value": ""
+        };
+    }
+    //Custom Field : Severity.
+    c_f_14345 = issueMeta.fields.customfield_14345;
+    if (c_f_14345 != null) {
+        c_f_14345 = c_f_14345;
+    } else {
+        c_f_14345 = {
+            "value": ""
+        };
+    }
+    //Custom Field : Module.
+    c_f_14641 = issueMeta.fields.customfield_14641;
+    if (c_f_14641 != null) {
+        c_f_14641 = c_f_14641;
+    } else {
+        c_f_14641 = {
+            "value": "SFDC"
+        };
+    }
+    //Custom Field : Recurrence Pattern is required.
+    c_f_11840 = issueMeta.fields.customfield_11840
+    if (c_f_11840 != null) {
+        c_f_11840 = c_f_18101;
+    } else {
+        c_f_11840 = [{
+            "value": "No"
+        }];
+    }
+
+    //Custom Field : CC Priority.
+    c_f_10157 = issueMeta.fields.customfield_10157
+    if (c_f_10157 != null) {
+        c_f_10157 = c_f_10157;
+    } else {
+        c_f_10157 = {
+            "value": "P2"
+        };
+    }
+    //Custom Field : SFDC UI.
+    c_f_18700 = issueMeta.fields.customfield_18700
+    if (c_f_18700 != null) {
+        c_f_18700 = c_f_18700;
+    } else {
+        c_f_18700 = {
+            "value": "Both"
+        };
+    }
+    //Custom Field : QA Discovery / Analysis.
+    c_f_19000 = issueMeta.fields.customfield_19000
+    if (c_f_19000 != null) {
+        c_f_19000 = c_f_19000;
+    } else {
+        c_f_19000 = null
+    }
+    //Custom Field : SFDC Seasonal Upgrade:
+    c_f_15341 = issueMeta.fields.customfield_15341
+    if (c_f_15341 != null) {
+        c_f_15341 = c_f_15341;
+    } else {
+        c_f_15341 = null
+    }
+    //Custom Field : Documentation Required
+    c_f_18201 = issueMeta.fields.customfield_18201
+    if (c_f_18201 != null) {
+        c_f_18201 = c_f_18201;
+    } else {
+        c_f_18201 = null
+    }
+    var data = {
+        "fields": {
+            "project": {
+                "key": destProj
+            },
+            "summary": summary,
+            "description": description,
+            "issuetype": {
+                "name": issueType
+            },
+            "components": [{
+                "name": comp[0].name
+            }],
+            "versions": [{
+                "name": ver[0].name
+            }],
+            "fixVersions": [{
+                "name": destFixversion
+            }],
+            "customfield_11744": c_f_11744,
+            "customfield_14345": c_f_14345,
+            "customfield_14641": c_f_14641,
+            "customfield_11743": c_f_11743,
+            "customfield_11240": c_f_11240,
+            "customfield_10157": c_f_10157,
+            "customfield_18700": c_f_18700,
+            "customfield_19000": c_f_19000,
+            "customfield_15341": c_f_15341,
+            "customfield_18201": c_f_18201,
+            "customfield_18101": c_f_18101
+        }
+    }
+    return data;
+}
+
+function markLabel(action) {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Issue List");
+    var MarkerLabel = PropertiesService.getScriptProperties().getProperty("MarkerLabel");
+    var data = sheet.getDataRange().getValues();
+    len = data.length;
+    var issueList = "";
+    cell_no = 3;
+    for (var i = 0; i <= len - 2; i++) {
+        l_pri = 'A' + cell_no;
+        c_pri = sheet.getRange(l_pri).getValue();
+        if (c_pri != "") {
+            if (action.toLowerCase() == "add") {
+                addLabel(c_pri, MarkerLabel);
+            } else {
+                removeLabel(c_pri, MarkerLabel);
+            }
+        }
+        cell_no = cell_no + 1;
+    }
+}
+
+function jsonRequestProcessor(url, method, payload, responseCode) {
+    var digestfull = authKey();
+    var headers = {
+        "content-type": "application/json",
+        "Accept": "application/json",
+        "authorization": digestfull,
+        "muteHttpExceptions": false
+    };
+    var options = {
+        "method": method,
+        "headers": headers,
+        "payload": JSON.stringify(payload)
+    };
+    var response = UrlFetchApp.fetch(url, options);
+    Logger.log(response.getContentText());
+    if (response.getResponseCode() != responseCode) {
+        Logger.log("Error fail to process Api call :" + response.getContentText());
+        return "fail";
+    } else {
+        return "sucess";
+    }
+
+}
+
+function testAddLabel() {
+    addLabel("PRI-10095", "CloneByCloner");
+}
+
+function testRemoveLabel() {
+    removeLabel("PRI-10095", "CloneByCloner");
+}
+
+function addLabel(issue_number, label) {
+    var url = "https://uswdv001.jira.com//rest/api/2/issue/" + issue_number;
+    var payload = {
+        "update": {
+            "labels": [{
+                "add": label
+            }]
+        }
+    };
+    jsonRequestProcessor(url, "PUT", payload, 204);
+}
+
+function removeLabel(issue_number, label) {
+    var url = "https://uswdv001.jira.com//rest/api/2/issue/" + issue_number;
+    var payload = {
+        "update": {
+            "labels": [{
+                "remove": label
+            }]
+        }
+    };
+    jsonRequestProcessor(url, "PUT", payload, 204);
+}
+
+
+function authKey() {
+    if (!PropertiesService.getUserProperties().getProperty("digest")) {
+        var userAndPassword = Browser.inputBox("Enter your Jira On Demand User id and Password in the form User:Password. e.g. Rohit:singh@123 (Note: This will be base64 Encoded and saved as a property on the spreadsheet)", "Userid:Password", Browser.Buttons.OK_CANCEL);
+        var x = Utilities.base64Encode(userAndPassword);
+        PropertiesService.getUserProperties().setProperty("digest", "Basic " + x);
+    }
+    var digestfull = PropertiesService.getUserProperties().getProperty("digest");
+    return digestfull;
+}
+
+function seachIssues(j_query) {
+    if (!j_query) {
+        Browser.msgBox("Null Query  :: " + j_query);
+    }
+    var fields = PropertiesService.getScriptProperties().getProperty("sfdc_fields");
+    var j_fields = "&fields=" + fields;
+    var url = "https://uswdv001.jira.com/rest/api/2/search?jql=" + j_query + j_fields;
+    Logger.log(url);
+    digestfull = authKey();
+    var headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "method": "GET",
+        "headers": {
+            "Authorization": digestfull
+        },
+        "muteHttpExceptions": true
+    };
+    try {
+        var resp = UrlFetchApp.fetch(url, headers);
+    } catch (e) {
+        Logger.log("Not able to get issue list from JIRA , Please verify JQL " + e.message);
+        return "Fail";
+    }
+    if (resp.getResponseCode() != 200) {
+        return "Fail";
+    } else {
+        json = resp.getContentText();
+    }
+    pri_list = JSON.parse(json);
+    return pri_list;
+}
+
+function testCloneLink() {
+    res = cloneLink("PRI-10095", "SFDC2-7602");
+}
+
+function cloneLink(inwardIssue, outwardIssue) {
+    var url = "https://uswdv001.jira.com/rest/api/2/issueLink";
+    var payload = {
+        "type": {
+            "name": "Cloners"
+        },
+        "inwardIssue": {
+            "key": inwardIssue
+        },
+        "outwardIssue": {
+            "key": outwardIssue
+        }
+    };
+    jsonRequestProcessor(url, "POST", payload, 201);
+}
+
+function createIssue(data) {
+    var url = "https://uswdv001.jira.com/rest/api/2/issue/";
+    var payload = JSON.stringify(data);
+    var digestfull = authKey();
+    var response;
+    var headers = {
+        "content-type": "application/json",
+        "Accept": "application/json",
+        "authorization": digestfull,
+        "muteHttpExceptions": false
+    };
+    var options = {
+        "content-type": "application/json",
+        "method": "POST",
+        "headers": headers,
+        "payload": payload
+    };
+    Logger.log(options);
+    try {
+        response = UrlFetchApp.fetch(url, options);
+        return response.getContentText();
+    } catch (e) {
+        Logger.log("Issue Creation Error " + e.message);
+        throw new Error(e.message);
+    }
+}
+
+function cleanSheet(sheetName) {
+    ss = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+    var last = ss.getLastRow();
+    if (last >= 2) {
+        ss.getRange(3, 1, last - 1, ss.getLastColumn()).clearFormat();
+        ss.getRange(3, 1, last - 1, ss.getLastColumn()).clearContent();
+    }
+}
+
+function testCopyData() {
+    copyData();
+}
+
+function copyData() {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var copySheet = ss.getSheetByName("Issue List");
+    var pasteSheet = ss.getSheetByName("backup");
+    var last = copySheet.getLastRow();
+    var source = copySheet.getRange(3, 1, last - 1, ss.getLastColumn());
+    var destination = pasteSheet.getRange(pasteSheet.getLastRow() + 1, 1);
+    source.copyTo(destination);
+    source.clearContent();
+}
