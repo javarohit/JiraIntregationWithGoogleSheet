@@ -1,0 +1,276 @@
+// Initila Call 
+
+function onOpen() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var menuEntries = 
+   [
+    {name: "Load SFDC", functionName: "loadSFDC"},
+    {name: "Load Service Now", functionName: "loadSNOW"},
+    {name: "Load Data", functionName: "loadDataPoint"},
+    {name: "Schedule 24 Hourly Automatic Refresh", functionName: "scheduleRefresh"},
+    {name: "Stop Automatic Refresh", functionName: "removeTriggers"},
+    {name: "Reset Password", functionName: "resetPassword"}
+  ]; 
+  ss.addMenu("Load", menuEntries);  
+  readQuery(); 
+ }
+function onEdit(e){
+  var MILLIS_PER_DAY = 1000 * 60 * 60 * 24;
+  var range = e.range;
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if(ss.getSheetName()=="DataAnalysis"){
+    var sheet = ss.getSheetByName("DataAnalysis");
+     col = range.getColumn();
+     row = range.getRow();
+     if(col == 7 && row==3){
+      var dt = new Date();
+      var val = range.getValue();
+      var currentDate = dt.getTime();
+      sheet.getRange("B3").setValue(Utilities.formatDate(new Date(currentDate -(MILLIS_PER_DAY*val)),"GMT+0530", "MM/dd/yyyy"));
+      sheet.getRange("C3").setValue(Utilities.formatDate(new Date(),"GMT+0530", "MM/dd/yyyy"));
+     }
+     if(col == 8 && row==3){
+      var dt = new Date();
+      var val = range.getValue();
+      var currentDate = dt.getTime();
+      sheet.getRange("D3").setValue(Utilities.formatDate(new Date(currentDate -(MILLIS_PER_DAY*val)),"GMT+0530", "MM/dd/yyyy"));
+      sheet.getRange("E3").setValue(Utilities.formatDate(new Date(),"GMT+0530", "MM/dd/yyyy"));
+    }
+  }
+  SpreadsheetApp.flush();
+}
+// Read all the queries from spreadsheet and create properties.
+function readQuery(){
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Query");
+  var values = sheet.getRange(2, 1, sheet.getLastRow(), sheet.getLastColumn()).getValues();
+  for(m=0;m < values.length;m++){
+    if(values[m][0]){ 
+      PropertiesService.getScriptProperties().setProperty(values[m][0],values[m][1]);
+      Logger.log("First : "+values[m][0]+ "Second" +values[m][1]);
+    }
+  }
+}
+
+//Remove Trigger
+function removeTriggers() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    ScriptApp.deleteTrigger(triggers[i]);
+  } 
+  Browser.msgBox("Spreadsheet will no longer refresh automatically."); 
+}  
+function scheduleRefresh() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    ScriptApp.deleteTrigger(triggers[i]);
+  }  
+  ScriptApp.newTrigger("loadDataPoint").timeBased().everyHours(24).create();  
+  Browser.msgBox("Spreadsheet will refresh automatically every 24 hours."); 
+}  
+
+function seachIssues(j_query){
+   if(!j_query){
+      Browser.msgBox("Null Query  :: "+j_query);
+   }
+   var url = "https://uswdv001.jira.com/rest/api/2/search?jql="+j_query+"&startAt=0&maxResults=1000";
+  Logger.log(url);
+  if (!PropertiesService.getScriptProperties().getProperty("digest")){
+    var userAndPassword = Browser.inputBox("Enter your Jira On Demand User id and Password in the form User:Password. e.g. Tommy.Smith:ilovejira (Note: This will be base64 Encoded and saved as a property on the spreadsheet)", "Userid:Password", Browser.Buttons.OK_CANCEL);
+    var x = Utilities.base64Encode(userAndPassword);
+    PropertiesService.getScriptProperties().setProperty("digest", "Basic " + x);
+  }
+  var digestfull = PropertiesService.getScriptProperties().getProperty("digest");
+   var headers = { "Accept":"application/json", 
+              "Content-Type":"application/json", 
+              "method": "GET",
+              "headers": {"Authorization": digestfull},
+              "muteHttpExceptions": true
+             };
+var resp = UrlFetchApp.fetch(url,headers);
+  if (resp.getResponseCode() != 200) {
+   Browser.msgBox("Error retrieving data for url" + url + ":" + resp.getContentText());
+    return "";
+  }  
+  else {
+    json = resp.getContentText();
+  }    
+   pri_list =  JSON.parse(json);
+  return pri_list;
+}
+function encodeQuery(query){
+  return encodeURIComponent(query).replace(/'/g,"%27").replace(/"/g,"%22");
+}
+
+function seachIssuesR(j_query,maxresult){
+   if(!j_query){
+      Browser.msgBox("Null Query  :: "+j_query);
+   }
+  var url = "https://uswdv001.jira.com/rest/api/2/search?jql="+j_query+"&startAt=0&maxResults="+maxresult;
+  Logger.log(url);
+  if (!PropertiesService.getScriptProperties().getProperty("digest")){
+    var userAndPassword = Browser.inputBox("Enter your Jira On Demand User id and Password in the form User:Password. e.g. Tommy.Smith:ilovejira (Note: This will be base64 Encoded and saved as a property on the spreadsheet)", "Userid:Password", Browser.Buttons.OK_CANCEL);
+    var x = Utilities.base64Encode(userAndPassword);
+    PropertiesService.getScriptProperties().setProperty("digest", "Basic " + x);
+  }
+  var digestfull = PropertiesService.getScriptProperties().getProperty("digest");
+  var headers = { "Accept":"application/json", 
+              "Content-Type":"application/json", 
+              "method": "GET",
+              "headers": {"Authorization": digestfull},
+              "muteHttpExceptions": true
+             };
+  var resp = UrlFetchApp.fetch(url,headers);
+  if (resp.getResponseCode() != 200) {
+    Browser.msgBox("Error retrieving data for url" + url + ":" + resp.getContentText());
+    return "";
+  }  
+  else {
+    json = resp.getContentText();
+  }    
+  pri_list =  JSON.parse(json);
+  return pri_list;
+}
+function encodeQuery(query){
+  return encodeURIComponent(query).replace(/'/g,"%27").replace(/"/g,"%22");
+}
+
+
+function loadSFDC(){
+  var SFDC_query = PropertiesService.getScriptProperties().getProperty("SFDC");
+  cleanSheet("SFDC");
+  SpreadsheetApp.flush();
+  loadDataToSheet(encodeQuery(SFDC_query),"SFDC");
+  SpreadsheetApp.flush();
+}
+
+function loadSNOW(){
+  var CSB_query = PropertiesService.getScriptProperties().getProperty("SNOW");
+  cleanSheet("ServiceNow");
+  SpreadsheetApp.flush();
+  loadDataToSheet(encodeQuery(CSB_query),"ServiceNow");
+  SpreadsheetApp.flush();
+}
+
+
+function loadDataPoint(){
+  //cleanSheet("DataPoint");
+  SpreadsheetApp.flush();
+  var data_sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("DataPoint");
+  data_sheet.getRange("B1").setValue("Last Update On : "+ Utilities.formatDate(new Date(), "GMT+0530", "dd-MM-yyyy") );
+  last_row = data_sheet.getLastRow(); 
+  Logger.log("Count : "+ last_row);
+  var query = "";
+  //SFDC 
+  data_sheet.getRange("A"+(last_row+1)).setValue("SFDC" );
+  data_sheet.getRange("B"+(last_row+1)).setValue(Utilities.formatDate(new Date(), "GMT+0530", "MM/dd/yyyy"));
+  SpreadsheetApp.flush();
+  query = PropertiesService.getScriptProperties().getProperty("SFDC_O_D");
+  data_sheet.getRange("C"+(last_row+1)).setValue((seachIssuesR(encodeQuery(query),0)).total);
+  query = PropertiesService.getScriptProperties().getProperty("SFDC_Cl_D");
+  data_sheet.getRange("D"+(last_row+1)).setValue((seachIssuesR(encodeQuery(query),0)).total);
+  query = PropertiesService.getScriptProperties().getProperty("SFDC_o_ip");
+  data_sheet.getRange("E"+(last_row+1)).setValue((seachIssuesR(encodeQuery(query),0)).total);
+  query = PropertiesService.getScriptProperties().getProperty("SFDC_r_re");
+  data_sheet.getRange("F"+(last_row+1)).setValue((seachIssuesR(encodeQuery(query),0)).total);
+  query = PropertiesService.getScriptProperties().getProperty("SFDC_v");
+  data_sheet.getRange("G"+(last_row+1)).setValue((seachIssuesR(encodeQuery(query),0)).total);
+  query = PropertiesService.getScriptProperties().getProperty("SFDC_Cl");
+  data_sheet.getRange("H"+(last_row+1)).setValue('=Text(B'+(last_row+1)+',"yyyy-mm")');
+  
+  //Service Now
+  data_sheet.getRange("A"+(last_row+2)).setValue("SNOW" );
+  data_sheet.getRange("B"+(last_row+2)).setValue(Utilities.formatDate(new Date(), "GMT+0530", "MM/dd/yyyy"));
+  SpreadsheetApp.flush();
+  query = PropertiesService.getScriptProperties().getProperty("SNOW_O_D");
+  data_sheet.getRange("C"+(last_row+2)).setValue((seachIssuesR(encodeQuery(query),0)).total);
+  query = PropertiesService.getScriptProperties().getProperty("SNOW_Cl_D");
+  data_sheet.getRange("D"+(last_row+2)).setValue((seachIssuesR(encodeQuery(query),0)).total);
+  query = PropertiesService.getScriptProperties().getProperty("SNOW_o_ip");
+  data_sheet.getRange("E"+(last_row+2)).setValue((seachIssuesR(encodeQuery(query),0)).total);
+  query = PropertiesService.getScriptProperties().getProperty("SNOW_r_re");
+  data_sheet.getRange("F"+(last_row+2)).setValue((seachIssuesR(encodeQuery(query),0)).total);
+  query = PropertiesService.getScriptProperties().getProperty("SNOW_v");
+  data_sheet.getRange("G"+(last_row+2)).setValue((seachIssuesR(encodeQuery(query),0)).total);
+  query = PropertiesService.getScriptProperties().getProperty("SNOW_Cl");
+  data_sheet.getRange("H"+(last_row+2)).setValue('=Text(B'+(last_row+1)+',"yyyy-mm")');
+  SpreadsheetApp.flush();
+}
+function loadDataToSheet(querySet,sheetName){
+issuelist = seachIssues(querySet);
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+  sheet.getRange("B1").setValue("Last Update On : "+ Utilities.formatDate(new Date(), "GMT+0530", "dd-MM-yyyy") );
+  sheet.getRange("C1").setValue("Update By : "+ Session.getActiveUser().getEmail() );
+  start_point = 3;
+  cc_priority = "";
+  cc_component_name =  "";
+  cc_severity = "";
+  cc_fixVersion = "";
+  cc_customer_impact = "" ;
+  issue_len = issuelist.issues.length;
+   for (i=0;i<issuelist.issues.length;i++) {
+    c_num = start_point+i;
+    c_pri=issuelist.issues[i].key;
+    //Custom Fields
+    // Priority
+    cc_priority = issuelist.issues[i].fields.customfield_10157;
+    if(cc_priority != null){
+      cc_priority = cc_priority.value;
+    }else{
+      cc_priority = "";
+    }
+    //Component
+    cc_component = issuelist.issues[i].fields.components;
+    if(cc_component[0] != null){
+      cc_component=cc_component[0].name;
+    }else{
+      cc_component = "";
+    }
+   cc_severity = issuelist.issues[i].fields.customfield_14345;
+   if(cc_severity != null){
+      cc_severity=cc_severity.value;
+    }else{
+      cc_severity = "";
+    }
+    //Version
+    cc_fixVersion = issuelist.issues[i].fields.fixVersions;
+    if(cc_fixVersion[0] != null){
+      cc_fixVersion=cc_fixVersion[0].name;
+    }else{
+      cc_fixVersion = "";
+    }  
+    // Customer Impact customfield_12540
+    cc_customer_impact = issuelist.issues[i].fields.customfield_12540;
+    if(cc_customer_impact != null){
+      cc_customer_impact = cc_customer_impact[0].value;
+    }else{
+      cc_customer_impact = "";
+    }
+    col_J = "=VLOOKUP(F"+(c_num)+",UserGroup!A:B,2,False)";
+    var newRow = [c_pri,issuelist.issues[i].fields.summary, 
+                  issuelist.issues[i].fields.status.name,
+                  cc_fixVersion,
+                  issuelist.issues[i].fields.updated.substr(0,10),
+                  issuelist.issues[i].fields.assignee.displayName,
+                  issuelist.issues[i].fields.created.substr(0,10),
+                  issuelist.issues[i].fields.issuetype.name,
+                  cc_priority,  // Priority
+                  cc_customer_impact, //Customer Impact
+                  cc_component,
+                  cc_severity, // Severity
+                  col_J
+                 ];     
+    var newData = [newRow];
+    sheet.getRange(c_num,1,1,13).setValues(newData)
+   }  
+}
+function resetPassword(){
+  PropertiesService.getScriptProperties().deleteProperty("digest");
+}
+function cleanSheet(sheetName){
+ss = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+  var last = ss.getLastRow();
+  if (last >= 2) {
+    ss.getRange(3, 1, last -1,ss.getLastColumn()).clearFormat();
+    ss.getRange(3, 1, last -1,ss.getLastColumn()).clearContent();
+  } 
+}
